@@ -1,160 +1,106 @@
-name: CI
+name: CI Pipeline for Java Application
 
+# 1. Disparador (Trigger) en Pull Requests hacia main
 on:
-  push:
-    branches: [ "*" ]
   pull_request:
-    branches: [ "*" ]
+    branches: [ "main" ]
 
-# Concurrency: cancel older runs for the same branch/PR
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# Configuración de permisos necesarios para publicar en GHCR
+permissions:
+  contents: read
+  packages: write
 
 jobs:
+  # JOB 1: Construcción (Build)
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
 
-    # -----------------------------------------------------------------------
-    # Permisos necesarios para subir (push) la imagen Docker a GitHub Packages
-    # -----------------------------------------------------------------------
-    permissions:
-      contents: read
-      packages: write
-    # NOTE: No "services:" block here.
-    # PostgreSQL is started inside a step (step 5) so that
-    # ${{ secrets.* }} are available when the container is created.
+      - name: Configurar Java y Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Compilar proyecto
+        run: ./gradlew bootJar -x test
+
+      - name: Guardar artefacto JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-app-jar
+          path: build/libs/*-SNAPSHOT.jar
+
+  # JOB 2: Pruebas (Test) - Depende de 'build'
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: ecommerce
+          POSTGRES_USER: store
+          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
-      # ---------------------------------------------------------------
-      # 1 Checkout repository
-      # ---------------------------------------------------------------
-      - name: Checkout repository
+      - name: Descargar código fuente
         uses: actions/checkout@v4
+
+      - name: Configurar Java y Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          fetch-depth: 0
+          java-version: '21'
+          distribution: 'temurin'
 
-      # ---------------------------------------------------------------
-      # 2 Set up JDK 21 (Temurin)
-      # ---------------------------------------------------------------
-      - name: Set up JDK 21 (Temurin)
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "21"
-          cache: "gradle"
-
-      # ---------------------------------------------------------------
-      # 3 Make Gradle wrapper executable
-      # ---------------------------------------------------------------
-      - name: Grant execute permission for Gradle wrapper
-        run: chmod +x ./gradlew
-
-      # ---------------------------------------------------------------
-      # 4 Cache Gradle dependencies
-      # ---------------------------------------------------------------
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      # ---------------------------------------------------------------
-      # Check if secrets are loading (Debugging)
-      # ---------------------------------------------------------------
-      - name: Verify Secrets Context
-        run: |
-          echo "Verificando si los secrets están llegando al runner..."
-          if [ -z "${{ secrets.DB_PASSWORD }}" ]; then
-            echo "❌ ERROR: DB_PASSWORD está vacío. GitHub no está inyectando el secret."
-          else
-            echo "✅ DB_PASSWORD detectado correctamente."
-          fi
-
-      # ---------------------------------------------------------------
-      # 5 Start PostgreSQL via docker run
-      # Using a step (not services:) so GitHub Secrets are available.
-      # ---------------------------------------------------------------
-      - name: Start PostgreSQL
-        run: |
-          docker run -d \
-            --name postgres \
-            -e POSTGRES_DB="${{ secrets.DB_NAME }}" \
-            -e POSTGRES_USER="${{ secrets.DB_USER }}" \
-            -e POSTGRES_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-            -p 5434:5432 \
-            postgres:16-alpine
-
-          echo "Waiting for PostgreSQL to be ready..."
-          for i in {1..15}; do
-            if docker exec postgres pg_isready -U "${{ secrets.DB_USER }}" > /dev/null 2>&1; then
-              echo "PostgreSQL is ready!"
-              exit 0
-            fi
-            # Check if container died
-            if [ "$(docker inspect -f '{{.State.Running}}' postgres)" != "true" ]; then
-              echo "Container stopped unexpectedly. Logs:"
-              docker logs postgres
-              exit 1
-            fi
-            echo "Waiting..."
-            sleep 2
-          done
-          echo "Timed out waiting for PostgreSQL. Logs:"
-          docker logs postgres
-          exit 1
-
-      # ---------------------------------------------------------------
-      # 6 Build and run tests
-      # Env vars override application.yaml and point to the container above.
-      # ---------------------------------------------------------------
-      - name: Build and run tests
+      - name: Ejecutar pruebas unitarias
+        run: ./gradlew test
         env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/${{ secrets.DB_NAME }}
-          SPRING_DATASOURCE_USERNAME: ${{ secrets.DB_USER }}
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/ecommerce
+          SPRING_DATASOURCE_USERNAME: store
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
-        run: ./gradlew clean build --no-daemon
 
-      # ---------------------------------------------------------------
-      # 7 Upload test reports (always, even on failure)
-      # ---------------------------------------------------------------
-      - name: Upload test reports
-        if: always()
-        uses: actions/upload-artifact@v4
+  # JOB 3: Publicación en GHCR - Depende de 'test'
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Descargar artefacto JAR
+        uses: actions/download-artifact@v4
         with:
-          name: test-reports
-          path: build/reports/tests/**
-          retention-days: 14
+          name: java-app-jar
+          path: build/libs
 
-      # ---------------------------------------------------------------
-      # 8 Upload application JAR artifact
-      # ---------------------------------------------------------------
-      - name: Upload build artifact (JAR)
-        if: success()
-        uses: actions/upload-artifact@v4
+      - name: Iniciar sesión en GHCR
+        uses: docker/login-action@v3
         with:
-          name: application-artifact
-          path: build/libs/*.jar
-          retention-days: 14
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------------------------------------------------------------
-      # 9 OPTIONAL: Build and push Docker image (push events only)
-      # ---------------------------------------------------------------
-      - name: Build Docker image
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
-        run: docker build -t acm-ecommerce:${{ github.sha }} .
+      - name: Formatear nombre del repositorio
+        id: repo_name
+        run: echo "IMAGE_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-      - name: Push Docker image to GHCR
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
-        env:
-          REGISTRY: ghcr.io
-          IMAGE_NAME: ${{ github.repository }}
-        run: |
-          echo ${{ secrets.GITHUB_TOKEN }} | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
-          docker tag acm-ecommerce:${{ github.sha }} $REGISTRY/$IMAGE_NAME:${{ github.sha }}
-          docker push $REGISTRY/$IMAGE_NAME:${{ github.sha }}
+      - name: Construir y publicar imagen Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:latest
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
