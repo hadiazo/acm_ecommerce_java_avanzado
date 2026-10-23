@@ -1,0 +1,116 @@
+name: CI Pipeline for Java Application
+
+# 1. Disparador (Trigger) en Pull Requests hacia main o master
+on:
+  pull_request:
+    branches: [ "main" ]
+
+# Configuración de permisos necesarios para publicar en GHCR
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Construcción (Build)
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      # 2. Entorno Java y Gestión de Caché (Ejemplo con Maven, cambia a gradle si aplica)
+      - name: Configurar Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Conceder permisos de ejecución a Gradle
+        run: chmod +x ./gradlew
+
+      # Compilamos generando el archivo JAR ejecutable
+      - name: Compilar proyecto
+        run: ./gradlew bootJar -x test
+
+      # Compartimos el JAR generado para que el Job de Docker pueda usarlo
+      - name: Guardar artefacto JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-app-jar
+          path: build/libs/*-SNAPSHOT.jar
+
+  # Pruebas (Test) - Depende de la compilación exitosa
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: ecommerce
+          POSTGRES_USER: store
+          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }} # Usamos el secreto de GitHub
+        ports:
+          - 5434:5432 # Mapea el puerto 5432 interno al 5434
+        # Espera a que Postgres esté listo antes de iniciar los pasos
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      # 3. Gestión de Secretos: Inyección segura de variables de entorno
+      - name: Ejecutar pruebas unitarias
+        run: ./gradlew test
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/ecommerce
+          SPRING_DATASOURCE_USERNAME: store
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
+  # Publicación de Imagen en GHCR - Depende del éxito de los tests
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@v4
+
+      - name: Descargar artefacto JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: java-app-jar
+          path: build/libs
+
+      - name: Iniciar sesión en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Formatear nombre del repositorio
+        id: repo_name
+        run: echo "IMAGE_NAME=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Construir y publicar imagen Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ env.IMAGE_NAME }}:latest
+            ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
