@@ -29,6 +29,14 @@ jobs:
       - name: Conceder permisos de ejecución a Gradle
         run: chmod +x ./gradlew
 
+      # 3. Gestión de Secretos: Inyección segura de variables de entorno
+      - name: Ejecutar pruebas unitarias
+        run: ./gradlew test
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/ecommerce
+          SPRING_DATASOURCE_USERNAME: store
+          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
       # Compilamos generando el archivo JAR ejecutable
       - name: Compilar proyecto
         run: ./gradlew bootJar -x test
