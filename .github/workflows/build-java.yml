@@ -1,6 +1,6 @@
 name: CI Pipeline for Java Application
 
-# 1. Disparador (Trigger) en Pull Requests hacia main o master
+# 1. Disparador (Trigger) en Pull Requests hacia main
 on:
   pull_request:
     branches: [ "main" ]
@@ -11,44 +11,29 @@ permissions:
   packages: write
 
 jobs:
-  # Construcción (Build)
+  # JOB 1: Construcción (Build)
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Descargar código fuente
         uses: actions/checkout@v4
 
-      # 2. Entorno Java y Gestión de Caché (Ejemplo con Maven, cambia a gradle si aplica)
-      - name: Configurar Java JDK
-        uses: actions/setup-java@v4
+      - name: Configurar Java y Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           java-version: '21'
           distribution: 'temurin'
-          cache: 'gradle'
 
-      - name: Conceder permisos de ejecución a Gradle
-        run: chmod +x ./gradlew
-
-      # 3. Gestión de Secretos: Inyección segura de variables de entorno
-      - name: Ejecutar pruebas unitarias
-        run: ./gradlew test
-        env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5434/ecommerce
-          SPRING_DATASOURCE_USERNAME: store
-          SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
-
-      # Compilamos generando el archivo JAR ejecutable
       - name: Compilar proyecto
         run: ./gradlew bootJar -x test
 
-      # Compartimos el JAR generado para que el Job de Docker pueda usarlo
       - name: Guardar artefacto JAR
         uses: actions/upload-artifact@v4
         with:
           name: java-app-jar
           path: build/libs/*-SNAPSHOT.jar
 
-  # Pruebas (Test) - Depende de la compilación exitosa
+  # JOB 2: Pruebas (Test) - Depende de 'build'
   test:
     runs-on: ubuntu-latest
     needs: build
@@ -59,10 +44,9 @@ jobs:
         env:
           POSTGRES_DB: ecommerce
           POSTGRES_USER: store
-          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }} # Usamos el secreto de GitHub
+          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}
         ports:
-          - 5434:5432 # Mapea el puerto 5432 interno al 5434
-        # Espera a que Postgres esté listo antes de iniciar los pasos
+          - 5434:5432
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -73,14 +57,12 @@ jobs:
       - name: Descargar código fuente
         uses: actions/checkout@v4
 
-      - name: Configurar Java JDK
-        uses: actions/setup-java@v4
+      - name: Configurar Java y Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           java-version: '21'
           distribution: 'temurin'
-          cache: 'gradle'
 
-      # 3. Gestión de Secretos: Inyección segura de variables de entorno
       - name: Ejecutar pruebas unitarias
         run: ./gradlew test
         env:
@@ -88,7 +70,7 @@ jobs:
           SPRING_DATASOURCE_USERNAME: store
           SPRING_DATASOURCE_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
-  # Publicación de Imagen en GHCR - Depende del éxito de los tests
+  # JOB 3: Publicación en GHCR - Depende de 'test'
   docker:
     runs-on: ubuntu-latest
     needs: test
